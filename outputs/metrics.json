@@ -1,0 +1,37 @@
+{
+  "fuente_video": "Óvalo Higuereta, Lima — 5 PM (hora punta)",
+  "total_detecciones": 9795,
+  "confianza_promedio": 0.678,
+  "distribucion_tipos": {
+    "auto": {
+      "detecciones": 7444,
+      "porcentaje": 76.0
+    },
+    "bus": {
+      "detecciones": 1965,
+      "porcentaje": 20.1
+    },
+    "camion": {
+      "detecciones": 364,
+      "porcentaje": 3.7
+    },
+    "moto": {
+      "detecciones": 22,
+      "porcentaje": 0.2
+    }
+  },
+  "flujo_por_minuto": {
+    "minuto_0": {
+      "detecciones": 5658,
+      "congestion": "Alto"
+    },
+    "minuto_1": {
+      "detecciones": 4137,
+      "congestion": "Alto"
+    }
+  },
+  "minuto_punta": 0,
+  "detecciones_en_punta": 5658,
+  "nivel_congestion": "Alto",
+  "nota": "Las detecciones incluyen duplicados por frame (mismo vehículo aparece en múltiples frames). ByteTrack para conteo único se implementa en la siguiente entrega."
+}
