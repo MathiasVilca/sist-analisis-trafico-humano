@@ -92,7 +92,7 @@ def detectar_vehiculos(modelo, frame):
     y esquina inferior derecha del rectángulo que rodea al vehículo.
     """
     # model() retorna una lista de resultados, uno por imagen procesada
-    resultados = modelo(frame, verbose=False)[0]
+    resultados = modelo.track(frame, persist=True, tracker="bytetrack.yaml", verbose=False)[0] #ahora usa model.track con bytetracker ByteTrack
     detecciones = []
 
     for box in resultados.boxes:
