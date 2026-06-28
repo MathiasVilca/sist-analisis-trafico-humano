@@ -92,12 +92,13 @@ def detectar_vehiculos(modelo, frame):
     y esquina inferior derecha del rectángulo que rodea al vehículo.
     """
     # model() retorna una lista de resultados, uno por imagen procesada
-    resultados = modelo(frame, verbose=False)[0]
+    resultados = modelo.track(frame, persist=True, tracker="bytetrack.yaml", verbose=False)[0] #ahora usa model.track con bytetracker ByteTrack
     detecciones = []
 
     for box in resultados.boxes:
         clase_id   = int(box.cls[0])
         confianza  = float(box.conf[0])
+        track_id = int(box.id[0]) if box.id is not None else -1 #Se guarda una id si la tiene
 
         # Ignorar si no es un vehículo de interés o confianza muy baja
         if clase_id not in CLASES_VEHICULO:
@@ -109,6 +110,7 @@ def detectar_vehiculos(modelo, frame):
         x1, y1, x2, y2 = map(int, box.xyxy[0])
 
         detecciones.append({
+            "track_id":   track_id, #se guarda id
             "tipo":       tipo,
             "confianza":  round(confianza, 3),
             "x1": x1, "y1": y1,
@@ -144,9 +146,9 @@ def anotar_frame(frame, detecciones, num_frame, conteo_total):
     cv2.putText(frame, f"Frame: {num_frame}", (10, panel_y),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1)
     panel_y += 22
-    for tipo, cantidad in conteo_total.items():
+    for tipo, set_ids in conteo_total.items():
         color = COLORES[tipo]
-        cv2.putText(frame, f"{tipo}: {cantidad}", (10, panel_y),
+        cv2.putText(frame, f"{tipo}: {len(set_ids)}", (10, panel_y),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1)
         panel_y += 22
 
@@ -213,7 +215,7 @@ def main():
     print("      Esto puede tardar 1-2 minutos...\n")
 
     registros    = []   # todas las detecciones para el CSV
-    conteo_total = {"auto": 0, "moto": 0, "bus": 0, "camion": 0}
+    conteo_total = {"auto": set(), "moto": set(), "bus": set(), "camion": set()} #uso de sets para guardar IDs
     num_frame    = 0
     frames_procesados = 0
 
@@ -235,13 +237,19 @@ def main():
 
         # Acumular conteo y guardar en registros
         for det in detecciones:
-            conteo_total[det["tipo"]] += 1
+            tipo = det["tipo"]
+            track_id = det["track_id"]
+            confianza = det["confianza"]
+            x1,y1,x2,y2= det["x1"],det["y1"],det["x2"],det["y2"]
+            if track_id != -1:
+                conteo_total[det["tipo"]].add(track_id)
             registros.append({
                 "frame":      num_frame,
-                "tipo":       det["tipo"],
-                "confianza":  det["confianza"],
-                "x1": det["x1"], "y1": det["y1"],
-                "x2": det["x2"], "y2": det["y2"]
+                "track_id": track_id,
+                "tipo":       tipo,
+                "confianza":  confianza,
+                "x1": x1, "y1": y1,
+                "x2": x2, "y2": y2,
             })
 
         # Anotar frame y escribir al video de salida
@@ -251,7 +259,7 @@ def main():
         # Progreso en consola cada 30 frames procesados
         if frames_procesados % 30 == 0:
             progreso = num_frame / total_frames * 100
-            total_detectados = sum(conteo_total.values())
+            total_detectados = sum(len(type) for type in conteo_total.values())
             print(f"  Frame {num_frame:>5}/{total_frames}  ({progreso:5.1f}%)  "
                   f"Vehículos detectados hasta ahora: {total_detectados}")
 
