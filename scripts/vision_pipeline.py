@@ -146,9 +146,9 @@ def anotar_frame(frame, detecciones, num_frame, conteo_total):
     cv2.putText(frame, f"Frame: {num_frame}", (10, panel_y),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1)
     panel_y += 22
-    for tipo, cantidad in conteo_total.items():
+    for tipo, set_ids in conteo_total.items():
         color = COLORES[tipo]
-        cv2.putText(frame, f"{tipo}: {cantidad}", (10, panel_y),
+        cv2.putText(frame, f"{tipo}: {len(set_ids)}", (10, panel_y),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1)
         panel_y += 22
 
