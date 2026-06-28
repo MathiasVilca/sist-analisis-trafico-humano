@@ -215,7 +215,7 @@ def main():
     print("      Esto puede tardar 1-2 minutos...\n")
 
     registros    = []   # todas las detecciones para el CSV
-    conteo_total = {"auto": 0, "moto": 0, "bus": 0, "camion": 0}
+    conteo_total = {"auto": set(), "moto": set(), "bus": set(), "camion": set()} #uso de sets para guardar IDs
     num_frame    = 0
     frames_procesados = 0
 
@@ -237,13 +237,19 @@ def main():
 
         # Acumular conteo y guardar en registros
         for det in detecciones:
-            conteo_total[det["tipo"]] += 1
+            tipo = det["tipo"]
+            track_id = det["track_id"]
+            confianza = det["confianza"]
+            x1,y1,x2,y2= det["x1"],det["y1"],det["x2"],det["y2"]
+            if track_id != -1:
+                conteo_total[det["tipo"]].add(track_id)
             registros.append({
                 "frame":      num_frame,
-                "tipo":       det["tipo"],
-                "confianza":  det["confianza"],
-                "x1": det["x1"], "y1": det["y1"],
-                "x2": det["x2"], "y2": det["y2"]
+                "track_id": track_id,
+                "tipo":       tipo,
+                "confianza":  confianza,
+                "x1": x1, "y1": y1,
+                "x2": x2, "y2": y2,
             })
 
         # Anotar frame y escribir al video de salida
@@ -253,7 +259,7 @@ def main():
         # Progreso en consola cada 30 frames procesados
         if frames_procesados % 30 == 0:
             progreso = num_frame / total_frames * 100
-            total_detectados = sum(conteo_total.values())
+            total_detectados = sum(len(type) for type in conteo_total.values())
             print(f"  Frame {num_frame:>5}/{total_frames}  ({progreso:5.1f}%)  "
                   f"Vehículos detectados hasta ahora: {total_detectados}")
 
