@@ -98,6 +98,7 @@ def detectar_vehiculos(modelo, frame):
     for box in resultados.boxes:
         clase_id   = int(box.cls[0])
         confianza  = float(box.conf[0])
+        track_id = int(box.id[0]) if box.id is not None else -1 #Se guarda una id si la tiene
 
         # Ignorar si no es un vehículo de interés o confianza muy baja
         if clase_id not in CLASES_VEHICULO:
@@ -109,6 +110,7 @@ def detectar_vehiculos(modelo, frame):
         x1, y1, x2, y2 = map(int, box.xyxy[0])
 
         detecciones.append({
+            "track_id":   track_id, #se guarda id
             "tipo":       tipo,
             "confianza":  round(confianza, 3),
             "x1": x1, "y1": y1,
