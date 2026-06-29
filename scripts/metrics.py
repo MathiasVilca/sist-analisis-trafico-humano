@@ -45,10 +45,10 @@ def cargar_detecciones(ruta):
     print(f"[1/5] Cargando detecciones desde {ruta}...")
     df = pd.read_csv(ruta)
 
-    columnas_esperadas = {"frame", "tipo", "confianza", "x1", "y1", "x2", "y2"}
+    columnas_esperadas = {"frame", "track_id", "tipo", "confianza", "x1", "y1", "x2", "y2"}
     if not columnas_esperadas.issubset(df.columns):
         raise ValueError(f"El CSV no tiene las columnas esperadas. Encontradas: {list(df.columns)}")
-
+    df = df[df["track_id"]!=-1] #solo cargamos 
     print(f"      {len(df)} detecciones cargadas.")
     print(f"      Frames únicos: {df['frame'].nunique()}")
     return df
@@ -60,11 +60,13 @@ def calcular_distribucion(df):
     Retorna un dict con cantidad y porcentaje por tipo.
     """
     print("\n[2/5] Calculando distribución por tipo de vehículo...")
-    conteo = df["tipo"].value_counts()
-    total  = len(df)
+    conteo_df = df.drop_duplicates(subset=['track_id']) #solo toma en cuenta la aparicion de un vehiculo
+    conteo = conteo_df["tipo"].value_counts()
+    total  = len(conteo_df)
 
     distribucion = {}
-    for tipo, cantidad in conteo.items():
+    for tipo, conjunto_ids in conteo.items():
+        cantidad=len(conjunto_ids)
         porcentaje = round(cantidad / total * 100, 1)
         distribucion[tipo] = {
             "detecciones": int(cantidad),
@@ -87,9 +89,9 @@ def calcular_flujo_por_minuto(df, fps_efectivos):
     """
     print("\n[3/5] Calculando flujo vehicular por minuto...")
 
-    df = df.copy()
-    df["segundo"] = df["frame"] / fps_efectivos
-    df["minuto"]  = (df["segundo"] // 60).astype(int)
+    flux_df = df.drop_duplicates("track_id",keep='first').copy()
+    flux_df["segundo"] = flux_df["frame"] / fps_efectivos
+    flux_df["minuto"]  = (flux_df["segundo"] // 60).astype(int)
 
     flujo = df.groupby("minuto").size().reset_index(name="detecciones")
 
