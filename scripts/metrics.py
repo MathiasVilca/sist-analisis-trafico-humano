@@ -28,8 +28,8 @@ FPS_EFECTIVOS = 30
 
 # Umbrales para clasificar el nivel de congestión
 # (detecciones por minuto — recordar que incluyen duplicados por frame)
-UMBRAL_BAJO  = 200   # menos de 200 det/min → congestión baja
-UMBRAL_MEDIO = 500   # entre 200 y 500      → congestión media
+UMBRAL_BAJO  = 15   # menos de 200 det/min → congestión baja
+UMBRAL_MEDIO = 30   # entre 200 y 500      → congestión media
                      # más de 500            → congestión alta
 
 
@@ -65,8 +65,7 @@ def calcular_distribucion(df):
     total  = len(conteo_df)
 
     distribucion = {}
-    for tipo, conjunto_ids in conteo.items():
-        cantidad=len(conjunto_ids)
+    for tipo, cantidad in conteo.items():
         porcentaje = round(cantidad / total * 100, 1)
         distribucion[tipo] = {
             "detecciones": int(cantidad),
@@ -88,13 +87,15 @@ def calcular_flujo_por_minuto(df, fps_efectivos):
     - Agrupamos detecciones por minuto para ver el flujo temporal
     """
     print("\n[3/5] Calculando flujo vehicular por minuto...")
+    #revertido (error :P)
+    df = df.copy()
+    df["segundo"] = df["frame"] / fps_efectivos
+    df["minuto"]  = (df["segundo"] // 60).astype(int)
 
-    flux_df = df.drop_duplicates("track_id",keep='first').copy()
-    flux_df["segundo"] = flux_df["frame"] / fps_efectivos
-    flux_df["minuto"]  = (flux_df["segundo"] // 60).astype(int)
-
-    flujo = df.groupby("minuto").size().reset_index(name="detecciones")
-
+    #ahora cuenta cuantos ids unicos existen por minuto
+    autos_por_frame = df.groupby(['minuto', 'frame'])['track_id'].nunique().reset_index(name='autos_presentes')
+    flujo = autos_por_frame.groupby('minuto')['autos_presentes'].mean().reset_index(name='detecciones')
+    flujo['detecciones'] = flujo['detecciones'].astype(int)
     for _, row in flujo.iterrows():
         nivel = clasificar_congestion(row["detecciones"])
         print(f"      Minuto {int(row['minuto'])}: {int(row['detecciones'])} detecciones → {nivel}")
