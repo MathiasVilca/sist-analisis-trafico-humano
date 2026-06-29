@@ -128,6 +128,7 @@ def anotar_frame(frame, detecciones, num_frame, conteo_total):
     for det in detecciones:
         tipo      = det["tipo"]
         confianza = det["confianza"]
+        track_id = det["track_id"]
         color     = COLORES[tipo]
         x1, y1, x2, y2 = det["x1"], det["y1"], det["x2"], det["y2"]
 
@@ -135,7 +136,7 @@ def anotar_frame(frame, detecciones, num_frame, conteo_total):
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
 
         # Etiqueta con tipo y confianza
-        etiqueta = f"{tipo} {confianza:.0%}"
+        etiqueta = f"{tipo} #{track_id} {confianza:.0%}"
         cv2.rectangle(frame, (x1, y1 - 20), (x1 + len(etiqueta) * 9, y1), color, -1)
         cv2.putText(frame, etiqueta, (x1 + 3, y1 - 5),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
