@@ -1,8 +1,12 @@
 ﻿.env
 venv/
-data/videos/
+data/videos/*
+!data/videos/README.md
 data/frames/
-data/datasets/
+data/datasets/*
+!data/datasets/roboflow-yolov8/
+!data/datasets/roboflow-yolov8/README.md
+!data/datasets/roboflow-yolov8/data.yaml
 outputs/video_anotado.mp4
 __pycache__/
 outputs/
