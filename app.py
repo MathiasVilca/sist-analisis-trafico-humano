@@ -1,214 +1,212 @@
-import json
+"""
+app.py — Dashboard interactivo del Sistema de Análisis de Tráfico Urbano.
+
+Flujo end-to-end:
+  1. El usuario sube un video de tráfico.
+  2. Se corre vision_pipeline.py (YOLOv8 + ByteTrack) sobre el video.
+  3. Se corre metrics.py para calcular flujo vehicular y nivel de congestión.
+  4. Se corre llm_reporter.py (Ollama / LLaMA 3.2) para generar recomendaciones.
+  5. Se muestra todo: video anotado, gráfico de flujo interactivo y reporte de IA.
+"""
+
+import sys
+import tempfile
 from pathlib import Path
 
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
-
 BASE_DIR = Path(__file__).resolve().parent
+SCRIPTS_DIR = BASE_DIR / "scripts"
 OUTPUTS_DIR = BASE_DIR / "outputs"
-METRICS_PATH = OUTPUTS_DIR / "metrics.json"
-FLOW_IMAGE_PATH = OUTPUTS_DIR / "flujo_por_minuto.png"
-REPORT_PATH = OUTPUTS_DIR / "report.txt"
+sys.path.insert(0, str(SCRIPTS_DIR))
+
+import vision_pipeline   # noqa: E402
+import metrics           # noqa: E402
+import llm_reporter      # noqa: E402
 
 
 st.set_page_config(
-    page_title="Análisis de Tráfico Humano",
+    page_title="Análisis de Tráfico Urbano — Lima",
     page_icon="🚦",
     layout="wide",
-    initial_sidebar_state="expanded",
 )
 
-
-@st.cache_data
-def load_metrics(path: Path) -> dict:
-    """Carga las métricas previamente generadas en outputs/metrics.json."""
-    with path.open("r", encoding="utf-8") as file:
-        return json.load(file)
+COLOR_NIVEL = {"Bajo": "#43A047", "Medio": "#FB8C00", "Alto": "#E53935"}
 
 
-@st.cache_data
-def load_report(path: Path) -> str:
-    """Carga el reporte textual previamente generado en outputs/report.txt."""
-    return path.read_text(encoding="utf-8")
+@st.cache_resource(show_spinner=False)
+def cargar_modelo_yolo():
+    """Carga YOLOv8 una sola vez por sesión de Streamlit (es lento y pesado)."""
+    return vision_pipeline.cargar_modelo()
 
 
-def format_percent(value: float) -> str:
-    """Convierte valores decimales a porcentaje legible."""
-    return f"{value * 100:.1f}%"
+def guardar_video_temporal(archivo_subido) -> Path:
+    """Guarda el video subido por el usuario en un archivo temporal en disco,
+    ya que OpenCV necesita una ruta de archivo, no un objeto en memoria."""
+    sufijo = Path(archivo_subido.name).suffix or ".mp4"
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=sufijo)
+    tmp.write(archivo_subido.read())
+    tmp.close()
+    return Path(tmp.name)
 
 
-def build_distribution_dataframe(metrics: dict) -> pd.DataFrame:
-    """Construye una tabla con la distribución por tipo de vehículo."""
-    distribution = metrics.get("distribucion_tipos", {})
-    rows = []
+def construir_grafico_flujo(metricas: dict) -> go.Figure:
+    """Gráfico de barras interactivo (Plotly) del flujo vehicular por segmentos."""
+    flujo = metricas.get("flujo_por_segmento", {})
+    segmentos, valores, colores, niveles = [], [], [], []
 
-    for vehicle_type, data in distribution.items():
-        rows.append(
-            {
-                "Tipo": vehicle_type.capitalize(),
-                "Detecciones": data.get("detecciones", 0),
-                "Porcentaje": f"{data.get('porcentaje', 0):.1f}%",
-            }
+    for clave, datos in sorted(flujo.items(), key=lambda kv: int(kv[0].replace("segmento_", ""))):
+        segmento = int(clave.replace("segmento_", ""))
+        nivel = datos.get("congestion", "Bajo")
+        inicio = segmento * metricas.get("intervalo_segundos", 15)
+        fin = inicio + metricas.get("intervalo_segundos", 15)
+        segmentos.append(f"{inicio}-{fin}s")
+        valores.append(datos.get("detecciones", 0))
+        colores.append(COLOR_NIVEL.get(nivel, "#43A047"))
+        niveles.append(nivel)
+
+    fig = go.Figure(
+        go.Bar(
+            x=segmentos, y=valores, marker_color=colores,
+            text=valores, textposition="outside",
+            customdata=niveles,
+            hovertemplate="%{x}<br>Vehículos simultáneos: %{y}<br>Congestión: %{customdata}<extra></extra>",
         )
+    )
+    intervalo = metricas.get("intervalo_segundos", 15)
+    fig.update_layout(
+        title=f"Flujo vehicular por segmento de {intervalo} segundos",
+        xaxis_title="Segmento de tiempo",
+        yaxis_title="Vehículos simultáneos (promedio)",
+        showlegend=False,
+        margin=dict(t=50, b=10),
+    )
+    return fig
 
-    return pd.DataFrame(rows)
 
+def ejecutar_pipeline_completo(ruta_video: Path, fuente_nombre: str, modelo):
+    """Corre vision_pipeline → metrics → llm_reporter en secuencia, actualizando
+    la interfaz con el progreso de cada etapa."""
+    OUTPUTS_DIR.mkdir(exist_ok=True)
 
-def build_flow_dataframe(metrics: dict) -> pd.DataFrame:
-    """Construye una tabla con el flujo vehicular por minuto."""
-    flow = metrics.get("flujo_por_minuto", {})
-    rows = []
+    estado = st.empty()
+    barra = st.progress(0.0)
 
-    for minute_key, data in flow.items():
-        minute_number = minute_key.replace("minuto_", "")
-        rows.append(
-            {
-                "Minuto": int(minute_number) if minute_number.isdigit() else minute_key,
-                "Detecciones": data.get("detecciones", 0),
-                "Congestión": data.get("congestion", "Sin dato"),
-            }
+    # 1) Visión + tracking
+    estado.info("🔍 Detectando y siguiendo vehículos con YOLOv8 + ByteTrack...")
+    resultado_vision = vision_pipeline.procesar_video(
+        ruta_video, carpeta_salida=OUTPUTS_DIR, modelo=modelo,
+        progress_callback=lambda frac: barra.progress(frac * 0.7),
+    )
+
+    # 2) Métricas
+    estado.info("📊 Calculando flujo vehicular y nivel de congestión...")
+    barra.progress(0.8)
+    metricas = metrics.generar_metricas(
+        resultado_vision["csv_path"], carpeta_salida=OUTPUTS_DIR,
+        fps_efectivos=resultado_vision["fps_efectivos"],
+        fuente_video=fuente_nombre,
+    )
+
+    # 3) Reporte con IA (Ollama)
+    estado.info("🧠 Generando recomendaciones con LLaMA 3.2 (Ollama local)...")
+    barra.progress(0.9)
+    try:
+        reporte = llm_reporter.generar_reporte_texto(
+            metricas["_json_path"], carpeta_salida=OUTPUTS_DIR
         )
+    except llm_reporter.OllamaNoDisponibleError as e:
+        reporte = None
+        st.session_state["error_ollama"] = str(e)
 
-    return pd.DataFrame(rows).sort_values("Minuto") if rows else pd.DataFrame()
+    barra.progress(1.0)
+    estado.success("✓ Procesamiento completo.")
 
-
-def render_missing_file_message(path: Path) -> None:
-    st.error(f"No se encontró el archivo requerido: `{path}`")
-    st.info(
-        "Ejecuta primero los scripts de generación de métricas/reporte o verifica "
-        "que la carpeta `outputs/` contenga los archivos esperados."
-    )
-
-
-def render_sidebar(metrics: dict) -> None:
-    st.sidebar.header("📊 Métricas")
-
-    st.sidebar.metric(
-        "Total de detecciones",
-        f"{metrics.get('total_detecciones', 0):,}".replace(",", " "),
-    )
-    st.sidebar.metric(
-        "Confianza promedio",
-        format_percent(float(metrics.get("confianza_promedio", 0))),
-    )
-    st.sidebar.metric(
-        "Nivel de congestión",
-        metrics.get("nivel_congestion", "Sin dato"),
-    )
-    st.sidebar.metric(
-        "Minuto punta",
-        f"Minuto {metrics.get('minuto_punta', 'N/D')}",
-        f"{metrics.get('detecciones_en_punta', 0)} detecciones",
-    )
-
-    st.sidebar.divider()
-    st.sidebar.subheader("🚗 Distribución por tipo")
-
-    distribution_df = build_distribution_dataframe(metrics)
-    if distribution_df.empty:
-        st.sidebar.warning("No hay datos de distribución disponibles.")
-    else:
-        st.sidebar.dataframe(distribution_df, hide_index=True, use_container_width=True)
-
-    note = metrics.get("nota")
-    if note:
-        st.sidebar.divider()
-        st.sidebar.caption(note)
+    st.session_state["resultado_vision"] = resultado_vision
+    st.session_state["metricas"] = metricas
+    st.session_state["reporte"] = reporte
 
 
-def render_upload_section() -> None:
-    st.subheader("🎥 Subir video")
-    uploaded_video = st.file_uploader(
-        "Selecciona un video para una futura ejecución del modelo",
-        type=["mp4", "avi", "mov", "mkv"],
-        help=(
-            "En esta versión la app solo muestra datos previos de outputs/. "
-            "El video subido todavía no se procesa con el modelo pesado."
-        ),
-    )
-
-    if uploaded_video is not None:
-        st.success(f"Video cargado visualmente: {uploaded_video.name}")
-        st.video(uploaded_video)
-    else:
-        st.info("Aún no se ha subido un video. Se muestran los resultados previos disponibles.")
-
-
-def render_main_panel(metrics: dict, report: str) -> None:
-    st.header("📄 Reporte de análisis")
-
-    source = metrics.get("fuente_video")
-    if source:
-        st.caption(f"Fuente de datos: {source}")
-
-    summary_col_1, summary_col_2, summary_col_3 = st.columns(3)
-    summary_col_1.metric("Detecciones", f"{metrics.get('total_detecciones', 0):,}".replace(",", " "))
-    summary_col_2.metric("Congestión", metrics.get("nivel_congestion", "Sin dato"))
-    summary_col_3.metric("Pico", f"Minuto {metrics.get('minuto_punta', 'N/D')}")
+def render_resultados():
+    """Muestra video anotado, métricas, gráfico interactivo y reporte de IA."""
+    metricas = st.session_state["metricas"]
+    resultado_vision = st.session_state["resultado_vision"]
+    reporte = st.session_state.get("reporte")
 
     st.divider()
-
-    graph_col, flow_col = st.columns([1.25, 1])
-
-    with graph_col:
-        st.subheader("📈 Flujo por minuto")
-        if FLOW_IMAGE_PATH.exists():
-            st.image(str(FLOW_IMAGE_PATH), use_column_width=True)
-        else:
-            render_missing_file_message(FLOW_IMAGE_PATH)
-
-    with flow_col:
-        st.subheader("⏱️ Tabla de flujo")
-        flow_df = build_flow_dataframe(metrics)
-        if flow_df.empty:
-            st.warning("No hay datos de flujo por minuto disponibles.")
-        else:
-            st.dataframe(flow_df, hide_index=True, use_container_width=True)
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Vehículos únicos detectados", metricas["total_detecciones"])
+    col2.metric("Nivel de congestión", metricas["nivel_congestion"])
+    intervalo = metricas.get("intervalo_segundos", 15)
+    segmento_punta = metricas.get("segmento_punta", 0)
+    inicio = segmento_punta * intervalo
+    fin = inicio + intervalo
+    col3.metric("Segmento pico", f"{inicio}-{fin}s")
 
     st.divider()
-    st.subheader("🧠 Reporte generado")
-    st.text_area(
-        "Contenido de outputs/report.txt",
-        value=report,
-        height=360,
-        label_visibility="collapsed",
-    )
+    video_col, chart_col = st.columns([1, 1.2])
+
+    with video_col:
+        st.subheader("🎥 Video anotado")
+        st.video(resultado_vision["video_path"])
+
+    with chart_col:
+        st.subheader("📈 Flujo vehicular por segmentos de tiempo")
+        st.plotly_chart(construir_grafico_flujo(metricas), use_container_width=True)
+
+        st.subheader("🚗 Distribución por tipo de vehículo")
+        dist_df = pd.DataFrame([
+            {"Tipo": tipo.capitalize(), "Vehículos": d["detecciones"], "Porcentaje": f"{d['porcentaje']}%"}
+            for tipo, d in metricas["distribucion_tipos"].items()
+        ])
+        st.dataframe(dist_df, hide_index=True, use_container_width=True)
+
+    st.divider()
+    st.subheader("🧠 Reporte y recomendaciones (LLaMA 3.2 vía Ollama)")
+    if reporte:
+        st.markdown(reporte.split("=" * 60)[-1].strip() or reporte)
+    else:
+        st.warning(
+            "No se pudo generar el reporte de IA porque Ollama no respondió. "
+            "Verifica que esté corriendo (`ollama serve`) y que el modelo esté "
+            "descargado (`ollama pull llama3.2`), luego vuelve a procesar el video."
+        )
+        if "error_ollama" in st.session_state:
+            with st.expander("Detalle técnico del error"):
+                st.code(st.session_state["error_ollama"])
 
 
-def main() -> None:
-    st.title("🚦 Sistema de Análisis de Tráfico Humano")
+def main():
+    st.title("🚦 Sistema de Análisis de Tráfico Urbano — Lima")
     st.markdown(
-        "Interfaz visual para consultar métricas, flujo por minuto y reporte generado "
-        "a partir de los archivos previos ubicados en `outputs/`."
+        "Sube un video de tráfico. El sistema detecta y sigue vehículos con "
+        "**YOLOv8 + ByteTrack**, calcula el flujo vehicular y genera "
+        "recomendaciones con **LLaMA 3.2** corriendo localmente en Ollama."
     )
 
-    required_files = [METRICS_PATH, REPORT_PATH]
-    missing_files = [path for path in required_files if not path.exists()]
+    archivo_subido = st.file_uploader(
+        "Selecciona un video (mp4, avi, mov, mkv)",
+        type=["mp4", "avi", "mov", "mkv"],
+    )
 
-    if missing_files:
-        for path in missing_files:
-            render_missing_file_message(path)
-        st.stop()
+    if archivo_subido is not None:
+        st.video(archivo_subido)
+        procesar = st.button("▶️ Procesar video", type="primary")
 
-    metrics = load_metrics(METRICS_PATH)
-    report = load_report(REPORT_PATH)
+        if procesar:
+            ruta_temporal = guardar_video_temporal(archivo_subido)
+            modelo = cargar_modelo_yolo()
+            try:
+                ejecutar_pipeline_completo(ruta_temporal, archivo_subido.name, modelo)
+            finally:
+                ruta_temporal.unlink(missing_ok=True)
 
-    render_sidebar(metrics)
-
-    upload_col, status_col = st.columns([1.2, 1])
-    with upload_col:
-        render_upload_section()
-
-    with status_col:
-        st.subheader("✅ Estado de datos")
-        st.success("Métricas previas cargadas correctamente.")
-        st.write(f"**Métricas:** `{METRICS_PATH.relative_to(BASE_DIR)}`")
-        st.write(f"**Gráfica:** `{FLOW_IMAGE_PATH.relative_to(BASE_DIR)}`")
-        st.write(f"**Reporte:** `{REPORT_PATH.relative_to(BASE_DIR)}`")
-
-    st.divider()
-    render_main_panel(metrics, report)
+    if "metricas" in st.session_state:
+        render_resultados()
+    elif archivo_subido is None:
+        st.info("Sube un video para comenzar el análisis.")
 
 
 if __name__ == "__main__":
