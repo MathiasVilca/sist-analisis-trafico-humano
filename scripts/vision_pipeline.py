@@ -72,14 +72,14 @@ def abrir_video(ruta):
     return cap, fps, ancho, alto, total_frames
 
 
-def preparar_salida(ruta, fps, ancho, alto):
+def preparar_salida(ruta, fps, ancho, alto, salto_frames=SALTO_FRAMES):
     """
     Prepara el VideoWriter para guardar el video anotado.
     Usamos mp4v como codec — compatible con Windows.
     """
-    Path("outputs").mkdir(exist_ok=True)
+    Path(ruta).parent.mkdir(parents=True, exist_ok=True)
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(ruta, fourcc, fps / SALTO_FRAMES, (ancho, alto))
+    writer = cv2.VideoWriter(ruta, fourcc, fps / salto_frames, (ancho, alto))
     return writer
 
 
@@ -156,17 +156,17 @@ def anotar_frame(frame, detecciones, num_frame, conteo_total):
     return frame
 
 
-def guardar_csv(registros):
+def guardar_csv(registros, csv_salida):
     """
     Guarda todas las detecciones en un CSV estructurado.
     Este CSV es la entrada para metrics.py y llm_reporter.py.
     
     Columnas: frame, tipo, confianza, x1, y1, x2, y2
     """
-    Path("outputs").mkdir(exist_ok=True)
+    Path(csv_salida).parent.mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame(registros)
-    df.to_csv(CSV_SALIDA, index=False)
-    print(f"\n      CSV guardado en: {CSV_SALIDA}")
+    df.to_csv(csv_salida, index=False)
+    print(f"\n      CSV guardado en: {csv_salida}")
     print(f"      Total de detecciones registradas: {len(df)}")
     return df
 
@@ -194,8 +194,105 @@ def imprimir_resumen(df, total_frames_procesados):
 
 
 # ─────────────────────────────────────────────
-# PIPELINE PRINCIPAL
+# PIPELINE PRINCIPAL (reutilizable desde app.py o CLI)
 # ─────────────────────────────────────────────
+
+def procesar_video(ruta_video, carpeta_salida="outputs", modelo=None,
+                    salto_frames=SALTO_FRAMES, progress_callback=None):
+    """
+    Ejecuta el pipeline completo de visión sobre un video:
+    detección + tracking (ByteTrack) + anotación + export a CSV.
+
+    Parámetros
+    ----------
+    ruta_video : str o Path — video de entrada (mp4/avi/mov).
+    carpeta_salida : str o Path — carpeta donde se guardan video_anotado.mp4 y detections.csv.
+    modelo : instancia de YOLO ya cargada (opcional). Si no se pasa, se carga una nueva
+             (en Streamlit conviene cargarla una sola vez con @st.cache_resource y reusarla).
+    salto_frames : cada cuántos frames se procesa (5 = ~6 FPS si el video es 30 FPS).
+    progress_callback : función opcional callback(fraccion_0_a_1) para reportar avance
+                         (usada por app.py para actualizar una barra de progreso).
+
+    Retorna
+    -------
+    dict con: csv_path, video_path, fps_original, fps_efectivos, frames_procesados, df
+    """
+    carpeta_salida = Path(carpeta_salida)
+    carpeta_salida.mkdir(parents=True, exist_ok=True)
+    video_salida = str(carpeta_salida / "video_anotado.mp4")
+    csv_salida   = str(carpeta_salida / "detections.csv")
+
+    if modelo is None:
+        modelo = cargar_modelo()
+
+    cap, fps, ancho, alto, total_frames = abrir_video(str(ruta_video))
+    writer = preparar_salida(video_salida, fps, ancho, alto, salto_frames)
+
+    fps_efectivos = fps / salto_frames if fps else 0
+
+    print(f"\n[3/4] Procesando video (1 de cada {salto_frames} frames)...")
+
+    registros    = []
+    conteo_total = {"auto": set(), "moto": set(), "bus": set(), "camion": set()}
+    num_frame    = 0
+    frames_procesados = 0
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        num_frame += 1
+        if num_frame % salto_frames != 0:
+            continue
+
+        frames_procesados += 1
+        detecciones = detectar_vehiculos(modelo, frame)
+
+        for det in detecciones:
+            tipo = det["tipo"]
+            track_id = det["track_id"]
+            if track_id != -1:
+                conteo_total[tipo].add(track_id)
+            registros.append({
+                "frame": num_frame,
+                "track_id": track_id,
+                "tipo": tipo,
+                "confianza": det["confianza"],
+                "x1": det["x1"], "y1": det["y1"],
+                "x2": det["x2"], "y2": det["y2"],
+            })
+
+        frame_anotado = anotar_frame(frame, detecciones, num_frame, conteo_total)
+        writer.write(frame_anotado)
+
+        if total_frames > 0 and progress_callback is not None:
+            progress_callback(min(num_frame / total_frames, 1.0))
+
+        if frames_procesados % 30 == 0:
+            progreso = num_frame / total_frames * 100 if total_frames else 0
+            total_detectados = sum(len(s) for s in conteo_total.values())
+            print(f"  Frame {num_frame:>5}/{total_frames}  ({progreso:5.1f}%)  "
+                  f"Vehículos únicos hasta ahora: {total_detectados}")
+
+    cap.release()
+    writer.release()
+
+    df = guardar_csv(registros, csv_salida)
+    imprimir_resumen(df, frames_procesados)
+
+    if progress_callback is not None:
+        progress_callback(1.0)
+
+    return {
+        "csv_path": csv_salida,
+        "video_path": video_salida,
+        "fps_original": fps,
+        "fps_efectivos": fps_efectivos,
+        "frames_procesados": frames_procesados,
+        "df": df,
+    }
+
 
 def main():
     print("\n" + "="*50)
@@ -203,77 +300,11 @@ def main():
     print("Vision Pipeline v1.0")
     print("="*50 + "\n")
 
-    # 1. Cargar modelo
-    modelo = cargar_modelo()
+    resultado = procesar_video(VIDEO_ENTRADA, carpeta_salida="outputs")
 
-    # 2. Abrir video
-    cap, fps, ancho, alto, total_frames = abrir_video(VIDEO_ENTRADA)
-
-    # 3. Preparar escritor del video anotado
-    writer = preparar_salida(VIDEO_SALIDA, fps, ancho, alto)
-
-    print(f"\n[3/4] Procesando video (1 de cada {SALTO_FRAMES} frames)...")
-    print("      Esto puede tardar 1-2 minutos...\n")
-
-    registros    = []   # todas las detecciones para el CSV
-    conteo_total = {"auto": set(), "moto": set(), "bus": set(), "camion": set()} #uso de sets para guardar IDs
-    num_frame    = 0
-    frames_procesados = 0
-
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break  # fin del video
-
-        num_frame += 1
-
-        # Saltar frames para acelerar el procesamiento
-        if num_frame % SALTO_FRAMES != 0:
-            continue
-
-        frames_procesados += 1
-
-        # Detectar vehículos en este frame
-        detecciones = detectar_vehiculos(modelo, frame)
-
-        # Acumular conteo y guardar en registros
-        for det in detecciones:
-            tipo = det["tipo"]
-            track_id = det["track_id"]
-            confianza = det["confianza"]
-            x1,y1,x2,y2= det["x1"],det["y1"],det["x2"],det["y2"]
-            if track_id != -1:
-                conteo_total[det["tipo"]].add(track_id)
-            registros.append({
-                "frame":      num_frame,
-                "track_id": track_id,
-                "tipo":       tipo,
-                "confianza":  confianza,
-                "x1": x1, "y1": y1,
-                "x2": x2, "y2": y2,
-            })
-
-        # Anotar frame y escribir al video de salida
-        frame_anotado = anotar_frame(frame, detecciones, num_frame, conteo_total)
-        writer.write(frame_anotado)
-
-        # Progreso en consola cada 30 frames procesados
-        if frames_procesados % 30 == 0:
-            progreso = num_frame / total_frames * 100
-            total_detectados = sum(len(type) for type in conteo_total.values())
-            print(f"  Frame {num_frame:>5}/{total_frames}  ({progreso:5.1f}%)  "
-                  f"Vehículos detectados hasta ahora: {total_detectados}")
-
-    # 4. Guardar resultados
-    print(f"\n[4/4] Guardando resultados...")
-    cap.release()
-    writer.release()
-
-    df = guardar_csv(registros)
-    imprimir_resumen(df, frames_procesados)
-
-    print(f"\n✓ Video anotado guardado en : {VIDEO_SALIDA}")
-    print(f"✓ CSV guardado en           : {CSV_SALIDA}")
+    print(f"\n✓ Video anotado guardado en : {resultado['video_path']}")
+    print(f"✓ CSV guardado en           : {resultado['csv_path']}")
+    print(f"✓ FPS efectivos             : {resultado['fps_efectivos']:.2f}")
     print("\nListo. Ahora puedes correr metrics.py\n")
 
 
